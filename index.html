@@ -226,6 +226,35 @@
             transform: scale(1.1);
         }
 
+        /* Segmented Control */
+        .segmented-control {
+            display: flex;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 4px;
+            border-radius: 12px;
+            margin-bottom: 1rem;
+        }
+
+        .segment-btn {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            background: transparent;
+            color: rgba(255, 255, 255, 0.6);
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+
+        .segment-btn.active {
+            background: rgba(255, 255, 255, 0.15);
+            color: #fff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            color: var(--accent-color);
+        }
+
         /* Action Buttons */
         .btn-row {
             display: flex;
@@ -327,6 +356,12 @@
         </div>
 
         <div class="controls">
+            <!-- Mode Switcher -->
+            <div class="segmented-control">
+                <button class="segment-btn active" id="modeWand" onclick="setMode('wand')">🪄 切り抜き</button>
+                <button class="segment-btn" id="modeMove" onclick="setMode('move')">✋ 配置・編集</button>
+            </div>
+
             <!-- 1. Frame Upload -->
             <div class="control-group">
                 <label>
@@ -364,6 +399,18 @@
     </div>
 
     <script>
+        // -- Fabric.js Customization (Better Visibility) --
+        fabric.Object.prototype.set({
+            borderColor: '#00d2ff',       // Cyan border
+            cornerColor: '#ffffff',       // White corners
+            cornerStrokeColor: '#00d2ff', // Cyan stroke on corners
+            cornerSize: 20,               // Large corners
+            transparentCorners: false,    // Solid feel
+            borderScaleFactor: 2,         // Thicker border
+            touchCornerSize: 24,          // Touch friendly
+            padding: 5                    // Space around object
+        });
+
         document.addEventListener('DOMContentLoaded', () => {
             // -- Elements --
             const uploadFrameBtn = document.getElementById('uploadFrame');
@@ -375,14 +422,68 @@
             const loadingOverlay = document.getElementById('loading');
             const photoName = document.getElementById('photoName');
 
+            // Mode Buttons
+            const modeWandBtn = document.getElementById('modeWand');
+            const modeMoveBtn = document.getElementById('modeMove');
+
             // -- State --
             let frameImgObj = null; // Fabric Image Object
             let currentFrameImageData = null; // Current ImageData state (canvas 2d)
             let originalFrameImageData = null; // Backup for reset
+            let currentMode = 'wand'; // 'wand' or 'move'
 
             // REMOVED fixed canvasSize. We use the Frame size now.
             let canvasBaseWidth = 800; // Default placeholder
             let canvasBaseHeight = 800;
+
+            // -- Mode Switch Logic --
+            window.setMode = (mode) => {
+                currentMode = mode;
+
+                // UI Update
+                if (mode === 'wand') {
+                    modeWandBtn.classList.add('active');
+                    modeMoveBtn.classList.remove('active');
+                    canvas.defaultCursor = 'crosshair';
+                    canvas.hoverCursor = 'crosshair';
+                } else {
+                    modeWandBtn.classList.remove('active');
+                    modeMoveBtn.classList.add('active');
+                    canvas.defaultCursor = 'default';
+                    canvas.hoverCursor = 'move';
+                }
+
+                // Logic Update
+                const objects = canvas.getObjects();
+                objects.forEach(obj => {
+                    if (obj === frameImgObj) {
+                        // Frame behavior
+                        if (mode === 'wand') {
+                            // Wand Mode: Frame catches interactions (for clicking)
+                            obj.evented = true;
+                            obj.selectable = false;
+                        } else {
+                            // Move Mode: Frame is "ghost" (clicks pass through)
+                            obj.evented = false;
+                            obj.selectable = false;
+                        }
+                    } else {
+                        // Photo behavior
+                        if (mode === 'wand') {
+                            // Wand Mode: Photos are background, not touchable
+                            obj.selectable = false;
+                            obj.evented = false;
+                        } else {
+                            // Move Mode: Photos are fully editable
+                            obj.selectable = true;
+                            obj.evented = true;
+                        }
+                    }
+                });
+
+                canvas.discardActiveObject();
+                canvas.requestRenderAll();
+            };
 
             // -- Helper: Show/Hide Loading --
             const setLoading = (isLoading) => {
@@ -394,11 +495,18 @@
                 width: canvasBaseWidth,
                 height: canvasBaseHeight,
                 preserveObjectStacking: true,
-                selection: false,
+                selection: true, // Enable selection (important for Move mode)
                 perPixelTargetFind: true, // Needed to detect clicks on frame
             });
 
-            // Handle Responsive Resize (Visual Only)
+            // Initial Mode Setup
+            // (Wait a tick to ensure canvas is ready if needed, though sequential exec is fine)
+            // We need to re-apply mode settings whenever objects are added
+            const applyModeSettings = () => {
+                window.setMode(currentMode);
+            };
+
+            // -- Fabric Canvas Init --
             const resizeCanvas = () => {
                 const wrapper = document.getElementById('canvasWrapper');
                 const canvasEl = canvas.getElement();
@@ -608,6 +716,7 @@
 
                             canvas.add(img);
                             img.bringToFront();
+                            applyModeSettings(); // Apply current mode
                             canvas.renderAll();
                             setLoading(false);
                         });
@@ -683,6 +792,7 @@
                             loadedCount++;
                             if (loadedCount === files.length) {
                                 if (frameImgObj) frameImgObj.bringToFront();
+                                applyModeSettings(); // Apply current mode
                                 canvas.renderAll();
                                 setLoading(false);
                             }
