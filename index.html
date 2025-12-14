@@ -103,7 +103,11 @@
         .canvas-wrapper {
             position: relative;
             width: 100%;
-            padding-top: 100%;
+            /* Remove padding-top hack, use JS driven aspect-ratio or strict sizing */
+            max-height: 60vh;
+            /* Limit height to 60% of viewport height */
+            margin: 0 auto;
+            /* Center horizontally */
             background-color: #2a2a2a;
             background-image:
                 linear-gradient(45deg, #333 25%, transparent 25%),
@@ -113,19 +117,29 @@
             background-size: 20px 20px;
             background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
             overflow: hidden;
-            /* Cursor for magic wand */
             cursor: crosshair;
+            display: flex;
+            justify-content: center;
+            align-items: center;
         }
 
         .canvas-container-inner {
-            position: absolute;
-            top: 0;
-            left: 0;
             width: 100%;
             height: 100%;
             display: flex;
             justify-content: center;
             align-items: center;
+        }
+
+        /* Force Fabric's container to be responsive */
+        .canvas-container {
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        .canvas-container canvas {
+            width: 100% !important;
+            height: 100% !important;
         }
 
         /* Controls */
@@ -307,6 +321,7 @@
 
         <div class="canvas-wrapper" id="canvasWrapper">
             <div class="canvas-container-inner">
+                <!-- IMPORTANT: Canvas element -->
                 <canvas id="c"></canvas>
             </div>
         </div>
@@ -325,7 +340,7 @@
                 <!-- Tolerance Slider -->
                 <div style="margin-top: 10px;">
                     <label style="font-size: 0.8rem; margin-bottom: 5px;">
-                        許容値 (この値以下の色の差をまとめて消します) <span id="thresholdValue">40</span>
+                        許容値 <span id="thresholdValue">40</span>
                     </label>
                     <input type="range" id="thresholdRange" min="1" max="150" value="40">
                 </div>
@@ -334,11 +349,13 @@
 
             <!-- 2. Photo Upload -->
             <div class="control-group">
-                <label>2. 写真 (下層) <span id="photoName">未選択</span></label>
+                <label>2. 写真 (下層・複数可) <span id="photoName"></span></label>
                 <div class="file-input-wrapper">
-                    <div class="file-input-btn">写真を選択または撮影</div>
-                    <input type="file" id="uploadPhoto" accept="image/*">
+                    <div class="file-input-btn">写真を選択または撮影 (複数可)</div>
+                    <input type="file" id="uploadPhoto" accept="image/*" multiple>
                 </div>
+                <button class="secondary-btn" id="deletePhotoBtn"
+                    style="margin-top: 10px; background: rgba(255, 75, 75, 0.4); font-size: 0.9rem;">選択した写真を削除</button>
             </div>
 
             <!-- Save Button -->
@@ -360,11 +377,12 @@
 
             // -- State --
             let frameImgObj = null; // Fabric Image Object
-            let photoImgObj = null; // Fabric Image Object
             let currentFrameImageData = null; // Current ImageData state (canvas 2d)
             let originalFrameImageData = null; // Backup for reset
 
-            const canvasSize = 800; // Intrinsic canvas resolution
+            // REMOVED fixed canvasSize. We use the Frame size now.
+            let canvasBaseWidth = 800; // Default placeholder
+            let canvasBaseHeight = 800;
 
             // -- Helper: Show/Hide Loading --
             const setLoading = (isLoading) => {
@@ -373,24 +391,51 @@
 
             // -- Fabric Canvas Init --
             const canvas = new fabric.Canvas('c', {
-                width: canvasSize,
-                height: canvasSize,
+                width: canvasBaseWidth,
+                height: canvasBaseHeight,
                 preserveObjectStacking: true,
                 selection: false,
                 perPixelTargetFind: true, // Needed to detect clicks on frame
             });
 
-            // Handle Responsive Resize
+            // Handle Responsive Resize (Visual Only)
             const resizeCanvas = () => {
                 const wrapper = document.getElementById('canvasWrapper');
-                const width = wrapper.clientWidth;
-                // Force square aspect
-                canvas.setDimensions({ width: width, height: width });
-                const scale = width / canvasSize;
-                canvas.setZoom(scale);
+                const canvasEl = canvas.getElement();
+
+                // Allow canvas element to visually fill the wrapper
+                canvasEl.style.width = '100%';
+                canvasEl.style.height = '100%';
+
+                if (canvasBaseWidth > 0 && canvasBaseHeight > 0) {
+                    // Check available space from parent container
+                    // The wrapper is inside .glass-container which has max-width: 500px
+                    const parentWidth = wrapper.parentElement ? wrapper.parentElement.clientWidth : window.innerWidth;
+
+                    // Constrain Max Width to parent width (minus potential padding if any, though here it is full width)
+                    const MAX_W = Math.min(window.innerWidth * 0.95, parentWidth);
+                    const MAX_H = window.innerHeight * 0.6;
+
+                    const aspect = canvasBaseWidth / canvasBaseHeight;
+
+                    let finalW = MAX_W;
+                    let finalH = finalW / aspect;
+
+                    // If height exceeds max height, constrain by height
+                    if (finalH > MAX_H) {
+                        finalH = MAX_H;
+                        finalW = finalH * aspect;
+                    }
+
+                    // Apply explicit pixel size to wrapper
+                    wrapper.style.width = `${finalW}px`;
+                    wrapper.style.height = `${finalH}px`;
+                    wrapper.style.aspectRatio = 'auto'; // Disable CSS aspect ratio
+                    wrapper.style.paddingTop = '0';
+                }
             };
             window.addEventListener('resize', resizeCanvas);
-            resizeCanvas(); // Initial call
+            resizeCanvas();
 
             // -- Flood Fill Algorithm --
             const floodFillScanline = (pixels, width, height, startX, startY, targetR, targetG, targetB, targetA, tolerance) => {
@@ -443,19 +488,19 @@
                 // Only process if clicking on the Frame layer
                 if (!options.target || options.target !== frameImgObj) return;
 
-                // Prevent photo manipulation when clicking frame
-                if (photoImgObj) {
-                    photoImgObj.selectable = true; // Temporary allow default logic for consistency check
-                }
-
                 setLoading(true);
 
-                // Need mouse coordinate relative to the INTERNAL canvas size (800x800)
+                // Pointer is relative to canvas element (scaled by CSS).
+                // Fabric.js getPointer is smart, it usually handles scaling if configured right.
+                // But with pure CSS scaling, we might receive coordinates relative to visual size.
+                // We need to map them to internal canvas size.
+
                 const pointer = canvas.getPointer(options.e);
+                // pointer is in target logic coordinates.
+
                 const x = Math.floor(pointer.x);
                 const y = Math.floor(pointer.y);
 
-                // Must use setTimeout to allow UI render (spinner)
                 setTimeout(() => {
                     if (!currentFrameImageData) {
                         setLoading(false);
@@ -465,43 +510,11 @@
                     const width = currentFrameImageData.width;
                     const height = currentFrameImageData.height;
 
-                    // The logic coordinates need to map to image texture coordinates
-                    // Since we fit the image to canvasSize(800), and image might be different, 
-                    // we need to translate pointer(800x800) to ImageCoords
-                    // BUT, to keep it simple, we scaled the image object to fit 800x800.
-                    // Implementation Detail: We are modifying the underlying pixels of the 800x800 canvas representation?
-                    // Better approach: We have 'currentFrameImageData' which matches the image source resolution.
-                    // We need to map pointer -> image source coords.
-
-                    const scaleX = frameImgObj.scaleX;
-                    const scaleY = frameImgObj.scaleY;
-                    const left = frameImgObj.left;
-                    const top = frameImgObj.top;
-
-                    // Frame centered at canvasSize/2. 
-                    // Image origin is center.
-                    // This coordinate math is tricky. 
-                    // Let's simplify: Set Image to top:0, left:0, scale to fit width exactly?
-                    // Previous code: scale then center. 
-
-                    // Let's re-calculate local mouse pos relative to image top-left (unscaled)
-                    // Inverse matrix transformation is reliable method.
-                    const matrix = frameImgObj.calcTransformMatrix();
-                    const invertedMatrix = fabric.util.invertTransform(matrix);
-                    const localPoint = fabric.util.transformPoint(pointer, invertedMatrix);
-
-                    const ix = Math.floor(localPoint.x + frameImgObj.width / 2); // localPoint is relative to center? No, fabric images logic depends on origin.
-                    // Actually, with originX:'center', originY:'center', simple transform gives range [-w/2, w/2].
-                    // So we add w/2.
-                    const finalIx = Math.round(localPoint.x + frameImgObj.width / 2); // Wait, fabric.Image default origin is 'top','left' usually, but I set center.
-                    // Wait, let's check my init code below: originX: 'center', originY: 'center'.
-                    // Correct.
-
-                    const finalIy = Math.round(localPoint.y + frameImgObj.height / 2);
+                    const finalIx = x;
+                    const finalIy = y;
 
                     // Bounds check
                     if (finalIx < 0 || finalIx >= width || finalIy < 0 || finalIy >= height) {
-                        console.log("Out of bounds", finalIx, finalIy);
                         setLoading(false);
                         return;
                     }
@@ -515,13 +528,12 @@
                     const targetA = data[pos + 3];
 
                     if (targetA === 0) {
-                        // Clicked on transparent, ignore
                         setLoading(false);
                         return;
                     }
 
                     // Execute Flood Fill
-                    const tolerance = parseInt(thresholdRange.value) * 3; // Approx multiplier for RGB sum diff
+                    const tolerance = parseInt(thresholdRange.value) * 3;
                     floodFillScanline(data, width, height, finalIx, finalIy, targetR, targetG, targetB, targetA, tolerance);
 
                     // Update Fabric Object
@@ -567,24 +579,31 @@
                             originalFrameImageData.height
                         );
 
+                        // Update Canvas base size to match image
+                        canvasBaseWidth = imgObj.width;
+                        canvasBaseHeight = imgObj.height;
+
+                        // IMPORTANT: Set internal resolution
+                        canvas.setDimensions({ width: canvasBaseWidth, height: canvasBaseHeight });
+
+                        resizeCanvas(); // Update UI aspect ratio
+
                         // Setup Fabric Object
                         if (frameImgObj) canvas.remove(frameImgObj);
 
                         fabric.Image.fromURL(imgObj.src, (img) => {
                             frameImgObj = img;
 
-                            // Scale logic: Fit to canvas, maintain aspect
-                            const scale = canvasSize / Math.max(img.width, img.height);
-                            img.scale(scale);
-
+                            // Scale logic: NO SCALING (Scale = 1)
+                            // Image now matches canvas 1:1
                             img.set({
-                                left: canvasSize / 2,
-                                top: canvasSize / 2,
-                                originX: 'center',
-                                originY: 'center',
-                                selectable: false, // Don't let user move frame
-                                hoverCursor: 'crosshair', // Show wand cursor
-                                evented: true // Must receive events for clicks
+                                left: 0,
+                                top: 0,
+                                originX: 'left',
+                                originY: 'top',
+                                selectable: false,
+                                hoverCursor: 'crosshair',
+                                evented: true
                             });
 
                             canvas.add(img);
@@ -627,82 +646,97 @@
                 thresholdValue.textContent = e.target.value;
             });
 
-            // -- 2. Photo Upload Logic --
+            // -- 2. Photo Upload Logic (Multiple) --
             uploadPhotoBtn.addEventListener('change', (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
+                const files = e.target.files;
+                if (!files || files.length === 0) return;
 
-                photoName.textContent = file.name.length > 10 ? file.name.substring(0, 8) + '...' : file.name;
                 setLoading(true);
+                let loadedCount = 0;
 
-                const reader = new FileReader();
-                reader.onload = (f) => {
-                    fabric.Image.fromURL(f.target.result, (img) => {
-                        if (photoImgObj) canvas.remove(photoImgObj);
+                Array.from(files).forEach(file => {
+                    const reader = new FileReader();
+                    reader.onload = (f) => {
+                        fabric.Image.fromURL(f.target.result, (img) => {
+                            // Scale photos to be reasonable relative to the frame
+                            // We use a safe fallback scale if frame not loaded yet
+                            const baseW = canvasBaseWidth || 800;
+                            const baseH = canvasBaseHeight || 800;
+                            const scale = Math.max(baseW / img.width, baseH / img.height);
+                            img.scale(scale * 0.5);
 
-                        photoImgObj = img;
-                        const scale = Math.max(canvasSize / img.width, canvasSize / img.height);
-                        img.scale(scale * 0.8);
+                            // Spread them out slightly
+                            const offset = (Math.random() - 0.5) * (baseW * 0.1);
 
-                        img.set({
-                            left: canvasSize / 2,
-                            top: canvasSize / 2,
-                            originX: 'center',
-                            originY: 'center',
-                            selectable: true,
-                            hasControls: true
+                            img.set({
+                                left: baseW / 2 + offset,
+                                top: baseH / 2 + offset,
+                                originX: 'center',
+                                originY: 'center',
+                                selectable: true,
+                                hasControls: true
+                            });
+
+                            canvas.add(img);
+                            img.sendToBack();
+
+                            loadedCount++;
+                            if (loadedCount === files.length) {
+                                if (frameImgObj) frameImgObj.bringToFront();
+                                canvas.renderAll();
+                                setLoading(false);
+                            }
                         });
+                    };
+                    reader.readAsDataURL(file);
+                });
 
-                        canvas.add(img);
-                        img.sendToBack();
+                photoName.textContent = `${files.length}枚追加しました`;
+            });
 
-                        if (frameImgObj) frameImgObj.bringToFront();
-
-                        canvas.setActiveObject(img);
-                        canvas.renderAll();
-                        setLoading(false);
+            // -- Delete Photo Logic --
+            const deletePhotoBtn = document.getElementById('deletePhotoBtn');
+            deletePhotoBtn.addEventListener('click', () => {
+                const activeObjects = canvas.getActiveObjects();
+                if (activeObjects.length) {
+                    canvas.discardActiveObject();
+                    activeObjects.forEach((obj) => {
+                        if (obj !== frameImgObj) {
+                            canvas.remove(obj);
+                        }
                     });
-                };
-                reader.readAsDataURL(file);
+                    canvas.renderAll();
+                } else {
+                    alert('削除したい写真を選択してください。');
+                }
+            });
+
+            // Keyboard delete support
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Delete' || e.key === 'Backspace') {
+                    const activeObjects = canvas.getActiveObjects();
+                    if (activeObjects.length) {
+                        activeObjects.forEach((obj) => {
+                            if (obj !== frameImgObj) {
+                                canvas.remove(obj);
+                            }
+                        });
+                        canvas.discardActiveObject();
+                        canvas.renderAll();
+                    }
+                }
             });
 
             // -- 3. Layer / Events --
             canvas.on('object:modified', () => {
+                // Keep frame on top
                 if (frameImgObj) frameImgObj.bringToFront();
-                if (photoImgObj) photoImgObj.sendToBack();
             });
-
-            // Pass clicks through frame if hitting transparent area?
-            // Fabric doesn't easily do "click through pixel transparent".
-            // But we need to drag photo BEHIND frame.
-            // When selecting photo, frame might block it.
-            // Solution: If photo is active, allow drag. 
-            // Issue: How to select photo if frame covers it fully?
-            // Answer: Photo is generally visible in transparent areas. 
-            // Fabric's `perPixelTargetFind: true` on Frame makes it so clicking transparent part ignores Frame.
-            // We enabled `perPixelTargetFind: true` on canvas? No, set it on object.
-
-            // Need to set perPixelTargetFind=true on the Frame object specifically.
-            // Updated uploadFrame logic to include this? Not needed if we control the events manually.
-            // Actually, if we use magic wand, we WANT to click non-transparent parts of Frame.
-            // If we want to select photo, we click transparent parts.
-            // So default behavior of perPixelTargetFind=true on Frame is exactly what we want!
-
-            // Wait, I didn't set perPixelTargetFind=true on the frame object in uploadFrame logic.
-            // I set it on canvas, which is global setting? No, canvas options has it.
-            // Let's verify: Fabric canvas option 'perPixelTargetFind' defaults to false.
-            // If I set it to true, object detection works on pixels.
-            // This is good for selecting the photo through the hole.
-
-            // BUT, for Magic Wand, we need to click the opaque part.
-            // So: Click Opaque -> Frame receives event -> Flood Fill.
-            // Click Transparent -> Frame IGNORES event -> Photo receives event (if behind).
-
-            // This logic is perfect.
 
             // -- 4. Download --
             saveBtn.addEventListener('click', () => {
-                if (!frameImgObj && !photoImgObj) {
+                // Check if any object exists
+                if (canvas.getObjects().length === 0) {
                     alert('画像がありません。');
                     return;
                 }
